@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Penrose P2 Sandbox — Kites & Darts</title>
+<style>
+  :root {
+    --bar-bg: #1d2230; --bar-fg: #e8ecf4; --accent: #6ea8ff; --btn: #2c3446; --btn-h: #3a4560;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; font-family: "Segoe UI", system-ui, sans-serif; background: #111; }
+  #bar {
+    position: fixed; top: 0; left: 0; right: 0; height: 56px; z-index: 10;
+    display: flex; align-items: center; gap: 10px; padding: 0 14px;
+    background: var(--bar-bg); color: var(--bar-fg); box-shadow: 0 2px 10px rgba(0,0,0,.35);
+    flex-wrap: nowrap; overflow-x: auto;
+  }
+  #bar h1 { font-size: 15px; font-weight: 600; margin: 0 10px 0 0; white-space: nowrap; letter-spacing: .3px; }
+  #bar h1 span { color: var(--accent); }
+  .sep { width: 1px; height: 28px; background: #3a4258; margin: 0 4px; flex: none; }
+  button, select {
+    font: inherit; font-size: 13px; color: var(--bar-fg); background: var(--btn);
+    border: 1px solid #414b63; border-radius: 7px; padding: 7px 12px; cursor: pointer; white-space: nowrap;
+    transition: background .15s, border-color .15s;
+  }
+  button:hover, select:hover { background: var(--btn-h); border-color: var(--accent); }
+  button.primary { border-color: #5b7fc0; }
+  select { padding-right: 8px; }
+  label.lbl { font-size: 13px; white-space: nowrap; opacity: .9; }
+  .switch { position: relative; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; white-space: nowrap; user-select: none; }
+  .switch input { display: none; }
+  .track { width: 38px; height: 21px; border-radius: 11px; background: #48526a; position: relative; transition: background .2s; flex: none; }
+  .track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 17px; height: 17px; border-radius: 50%; background: #fff; transition: transform .2s; box-shadow: 0 1px 3px rgba(0,0,0,.4); }
+  .switch input:checked + .track { background: var(--accent); }
+  .switch input:checked + .track::after { transform: translateX(17px); }
+  #count { margin-left: auto; font-size: 12px; opacity: .7; white-space: nowrap; }
+  canvas { position: fixed; top: 56px; left: 0; display: block; touch-action: none; }
+  #help {
+    position: fixed; bottom: 10px; left: 12px; z-index: 5; font-size: 12px; color: rgba(255,255,255,.8);
+    background: rgba(20,24,34,.72); padding: 8px 12px; border-radius: 8px; line-height: 1.5; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="bar">
+  <h1>Penrose <span>P2</span> Sandbox</h1>
+  <button id="addKite" class="primary">Add Kite</button>
+  <button id="addDart" class="primary">Add Dart</button>
+  <button id="reset">Reset Screen</button>
+  <button id="regen">Regenerate Colors</button>
+  <div class="sep"></div>
+  <label class="lbl" for="theme">Theme</label>
+  <select id="theme"></select>
+  <label class="switch"><input type="checkbox" id="split"><span class="track"></span>Split Type Colors</label>
+  <div id="count">0 tiles</div>
+</div>
+<canvas id="cv"></canvas>
+<div id="help">
+  Drag tile to move &middot; drag ◯ handle to rotate (Shift = 36° steps) &middot; Delete removes selected<br>
+  Drag empty space to pan &middot; mouse wheel to zoom &middot; edges snap when within 1/5 of their length
+</div>
+
+<script>
+(() => {
+"use strict";
+
+/* ===================== 1. Geometry ===================== */
+const PHI = (1 + Math.sqrt(5)) / 2;          // golden ratio
+const UNIT = 70;                              // px per short edge (world units)
+const D36 = Math.PI / 5;
+
+// Both tiles: apex at origin, axis along +y. Long edges = φ, short edges = 1.
+// Kite angles 72/72/72/144; Dart angles 36/72/36/216.
+function rawKite() {
+  const s = Math.sin(D36) * PHI, c = Math.cos(D36) * PHI;
+  return [[0, 0], [s, c], [0, PHI], [-s, c]];   // A, B, tail(C), D
+}
+function rawDart() {
+  const s = Math.sin(D36) * PHI, c = Math.cos(D36) * PHI;
+  return [[0, 0], [s, c], [0, 1], [-s, c]];     // A, B, reflex(C), D
+}
+// Centre on polygon centroid (geometric centre) and scale.
+function centred(pts) {
+  let a = 0, cx = 0, cy = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [x0, y0] = pts[i], [x1, y1] = pts[(i + 1) % pts.length];
+    const cr = x0 * y1 - x1 * y0;
+    a += cr; cx += (x0 + x1) * cr; cy += (y0 + y1) * cr;
+  }
+  a /= 2; cx /= 6 * a; cy /= 6 * a;
+  let out = pts.map(([x, y]) => [(x - cx) * UNIT, (y - cy) * UNIT]);
+  // enforce counter-clockwise (in y-down canvas space: positive signed area) for consistent edge directions
+  let sa = 0;
+  for (let i = 0; i < out.length; i++) { const p = out[i], q = out[(i + 1) % out.length]; sa += p[0] * q[1] - q[0] * p[1]; }
+  if (sa < 0) out.reverse();
+  return out;
+}
+const SHAPES = { kite: centred(rawKite()), dart: centred(rawDart()) };
+const RADIUS = {};
+for (const k in SHAPES) RADIUS[k] = Math.max(...SHAPES[k].map(([x, y]) => Math.hypot(x, y)));
+
+/* ===================== 2. Themes ===================== */
+const THEMES = {
+  "Aurora":        { bg: "#0f1724", grid: "#1d2a3e", stroke: "#0b1220", colors: ["#2dd4bf", "#38bdf8", "#818cf8", "#c084fc", "#f472b6", "#a3e635"] },
+  "Sunset":        { bg: "#2a1622", grid: "#3a2030", stroke: "#1b0d15", colors: ["#ff6b6b", "#ff9f43", "#feca57", "#ee5a8f", "#c56cf0", "#ff7979"] },
+  "Ocean Depths":  { bg: "#06141f", grid: "#0e2433", stroke: "#03101a", colors: ["#0ea5e9", "#22d3ee", "#14b8a6", "#1e40af", "#5eead4", "#3b82f6"] },
+  "Forest":        { bg: "#121a12", grid: "#1d2a1d", stroke: "#0a100a", colors: ["#4d7c0f", "#65a30d", "#a3b18a", "#588157", "#dda15e", "#bc6c25"] },
+  "Bauhaus":       { bg: "#f2ede3", grid: "#e2dccf", stroke: "#1a1a1a", colors: ["#d62828", "#f7b801", "#1d4e89", "#222222", "#f4f1de", "#2a9d8f"] },
+  "Pastel Dream":  { bg: "#fbf7f4", grid: "#ece6e1", stroke: "#6b5e62", colors: ["#ffc8dd", "#bde0fe", "#cdb4db", "#a2d2ff", "#ffafcc", "#caffbf"] },
+  "Monochrome":    { bg: "#f4f4f4", grid: "#e2e2e2", stroke: "#111111", colors: ["#1f1f1f", "#3d3d3d", "#6b6b6b", "#9a9a9a", "#c8c8c8", "#eaeaea"] },
+  "Neon Night":    { bg: "#0a0a12", grid: "#171728", stroke: "#000000", colors: ["#ff00e5", "#00f0ff", "#faff00", "#7cff00", "#ff6a00", "#8a2bff"] },
+  "Terracotta":    { bg: "#f5ebe0", grid: "#e8d8c8", stroke: "#3d2b1f", colors: ["#c8553d", "#f28f3b", "#588b8b", "#ffd5c2", "#2f4858", "#e9c46a"] }
+};
+
+/* ===================== 3. State ===================== */
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+let dpr = 1, W = 0, H = 0;
+let tiles = [];               // {id,type,x,y,a,ci}
+let nextId = 1;
+let selected = null;
+let themeName = "Aurora";
+let split = false;
+let splitPair = [0, 1];       // palette indices for [kite, dart] when split
+const cam = { x: 0, y: 0, z: 1 };
+let drag = null;              // {mode:'move'|'rotate'|'pan', ...}
+let snapInfo = null;          // {edgeA:[p,q], edgeB:[p,q]} for highlight
+
+const theme = () => THEMES[themeName];
+function tileColor(t) {
+  const c = theme().colors;
+  if (split) return c[splitPair[t.type === "kite" ? 0 : 1] % c.length];
+  return c[t.ci % c.length];
+}
+
+/* ===================== 4. Transforms ===================== */
+function worldVerts(t, x = t.x, y = t.y, a = t.a) {
+  const cs = Math.cos(a), sn = Math.sin(a);
+  return SHAPES[t.type].map(([px, py]) => [x + px * cs - py * sn, y + px * sn + py * cs]);
+}
+const toWorld = (sx, sy) => [(sx - W / 2) / cam.z + cam.x, (sy - H / 2) / cam.z + cam.y];
+const toScreen = (wx, wy) => [(wx - cam.x) * cam.z + W / 2, (wy - cam.y) * cam.z + H / 2];
+
+function handlePos(t) {
+  // rotation handle offset "above" the tile in the tile's own frame (rotates with it)
+  const d = RADIUS[t.type] + 30 / cam.z;
+  return [t.x + Math.sin(t.a) * d, t.y - Math.cos(t.a) * d];
+}
+
+function pointInPoly(px, py, v) {
+  let inside = false;
+  for (let i = 0, j = v.length - 1; i < v.length; j = i++) {
+    const [xi, yi] = v[i], [xj, yj] = v[j];
+    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+/* ===================== 5. Snapping Engine ===================== */
+// Each edge of the moving tile is tested against every edge of every other tile with the
+// SAME length (long φ or short 1). If the midpoints are within 1/5 of the edge length,
+// the tile is rotated so the edges are exactly antiparallel (collinear, outward-facing)
+// and translated so their midpoints coincide (centred).
+const LEN_EPS = 0.5; // px tolerance for "same length"
+function edgesOf(v) {
+  const e = [];
+  for (let i = 0; i < v.length; i++) {
+    const p = v[i], q = v[(i + 1) % v.length];
+    e.push({ i, p, q, len: Math.hypot(q[0] - p[0], q[1] - p[1]), mx: (p[0] + q[0]) / 2, my: (p[1] + q[1]) / 2 });
+  }
+  return e;
+}
+function findSnap(t, x, y, a) {
+  const mine = edgesOf(worldVerts(t, x, y, a));
+  let best = null;
+  for (const o of tiles) {
+    if (o === t) continue;
+    if (Math.hypot(o.x - x, o.y - y) > RADIUS[o.type] + RADIUS[t.type] + UNIT) continue; // broad phase
+    const theirs = edgesOf(worldVerts(o));
+    for (const e of mine) for (const f of theirs) {
+      if (Math.abs(e.len - f.len) > LEN_EPS) continue;
+      const d = Math.hypot(e.mx - f.mx, e.my - f.my);
+      if (d < e.len / 5 && (!best || d < best.d)) best = { d, e, f, o };
+    }
+  }
+  if (!best) return null;
+  // Local edge direction of the moving tile's edge
+  const L = SHAPES[t.type], i = best.e.i;
+  const lp = L[i], lq = L[(i + 1) % L.length];
+  const localDir = Math.atan2(lq[1] - lp[1], lq[0] - lp[0]);
+  const targetDir = Math.atan2(best.f.q[1] - best.f.p[1], best.f.q[0] - best.f.p[0]) + Math.PI;
+  const na = normAngle(targetDir - localDir);
+  // Edge midpoint in local coords rotated by new angle
+  const lmx = (lp[0] + lq[0]) / 2, lmy = (lp[1] + lq[1]) / 2;
+  const cs = Math.cos(na), sn = Math.sin(na);
+  const nx = best.f.mx - (lmx * cs - lmy * sn);
+  const ny = best.f.my - (lmx * sn + lmy * cs);
+  return { x: nx, y: ny, a: na, edgeB: [best.f.p, best.f.q] };
+}
+function normAngle(a) { a %= 2 * Math.PI; if (a > Math.PI) a -= 2 * Math.PI; if (a < -Math.PI) a += 2 * Math.PI; return a; }
+
+/* ===================== 6. Rendering ===================== */
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth; H = window.innerHeight - 56;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  cv.style.width = W + "px"; cv.style.height = H + "px";
+  draw();
+}
+
+function drawGrid() {
+  const th = theme();
+  ctx.fillStyle = th.bg; ctx.fillRect(0, 0, W, H);
+  const step = UNIT * cam.z;
+  if (step < 12) return;
+  const [wx0, wy0] = toWorld(0, 0);
+  const ox = ((-wx0 * cam.z) % step + step) % step, oy = ((-wy0 * cam.z) % step + step) % step;
+  ctx.fillStyle = th.grid;
+  for (let x = ox; x < W; x += step) for (let y = oy; y < H; y += step) {
+    ctx.beginPath(); ctx.arc(x, y, 1.6, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function pathPoly(v) {
+  ctx.beginPath();
+  v.forEach(([x, y], k) => { const [sx, sy] = toScreen(x, y); k ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); });
+  ctx.closePath();
+}
+
+function draw() {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  drawGrid();
+  const th = theme();
+  ctx.lineJoin = "round"; ctx.lineCap = "round";
+
+  for (const t of tiles) {
+    const v = worldVerts(t);
+    pathPoly(v);
+    ctx.fillStyle = tileColor(t);
+    ctx.fill();
+    ctx.lineWidth = Math.max(1, 1.6 * cam.z);
+    ctx.strokeStyle = th.stroke;
+    ctx.stroke();
+  }
+
+  // Snap highlight
+  if (snapInfo) {
+    const [a, b] = [toScreen(...snapInfo.edgeB[0]), toScreen(...snapInfo.edgeB[1])];
+    ctx.save();
+    ctx.strokeStyle = "#ffffff"; ctx.shadowColor = "#6ea8ff"; ctx.shadowBlur = 14;
+    ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(...a); ctx.lineTo(...b); ctx.stroke();
+    ctx.restore();
+  }
+
+  // Selection + rotation handle
+  if (selected) {
+    const v = worldVerts(selected);
+    ctx.save();
+    pathPoly(v);
+    ctx.setLineDash([6, 4]);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#ffffff"; ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.lineWidth = 1; ctx.strokeStyle = "rgba(0,0,0,.6)"; ctx.stroke();
+
+    const [cx, cy] = toScreen(selected.x, selected.y);
+    const [hx, hy] = toScreen(...handlePos(selected));
+    ctx.strokeStyle = "rgba(255,255,255,.85)"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(hx, hy); ctx.stroke();
+    ctx.fillStyle = "#ffffff"; ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.fill();
+
+    ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 6;
+    ctx.fillStyle = drag && drag.mode === "rotate" ? "#6ea8ff" : "#ffffff";
+    ctx.beginPath(); ctx.arc(hx, hy, 11, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = "#2c3446"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(hx, hy, 5.5, -Math.PI * 0.15, Math.PI * 1.35); ctx.stroke();
+    const ang = Math.PI * 1.35, ax = hx + Math.cos(ang) * 5.5, ay = hy + Math.sin(ang) * 5.5;
+    ctx.fillStyle = "#2c3446";
+    ctx.beginPath(); ctx.moveTo(ax - 3.5, ay - 1); ctx.lineTo(ax + 2.5, ay - 3.5); ctx.lineTo(ax + 1.5, ay + 3); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  document.getElementById("count").textContent =
+    `${tiles.length} tile${tiles.length === 1 ? "" : "s"} · ${tiles.filter(t => t.type === "kite").length} kites · ${tiles.filter(t => t.type === "dart").length} darts`;
+}
+
+let raf = 0;
+const requestDraw = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; draw(); }); };
+
+/* ===================== 7. Interaction ===================== */
+function pointerPos(e) { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
+
+cv.addEventListener("pointerdown", e => {
+  const [sx, sy] = pointerPos(e);
+  const [wx, wy] = toWorld(sx, sy);
+  cv.setPointerCapture(e.pointerId);
+
+  // Rotation handle has priority
+  if (selected) {
+    const [hx, hy] = toScreen(...handlePos(selected));
+    if (Math.hypot(sx - hx, sy - hy) <= 14) {
+      drag = { mode: "rotate", t: selected, startA: selected.a, startPtr: Math.atan2(wy - selected.y, wx - selected.x) };
+      requestDraw(); return;
+    }
+  }
+  // Topmost tile hit
+  for (let k = tiles.length - 1; k >= 0; k--) {
+    const t = tiles[k];
+    if (pointInPoly(wx, wy, worldVerts(t))) {
+      tiles.splice(k, 1); tiles.push(t);           // bring to front
+      selected = t;
+      drag = { mode: "move", t, offX: wx - t.x, offY: wy - t.y };
+      cv.style.cursor = "grabbing";
+      requestDraw(); return;
+    }
+  }
+  selected = null;
+  drag = { mode: "pan", sx, sy, cx: cam.x, cy: cam.y };
+  cv.style.cursor = "grabbing";
+  requestDraw();
+});
+
+cv.addEventListener("pointermove", e => {
+  const [sx, sy] = pointerPos(e);
+  const [wx, wy] = toWorld(sx, sy);
+  if (!drag) { updateHoverCursor(sx, sy, wx, wy); return; }
+
+  if (drag.mode === "pan") {
+    cam.x = drag.cx - (sx - drag.sx) / cam.z;
+    cam.y = drag.cy - (sy - drag.sy) / cam.z;
+  } else if (drag.mode === "move") {
+    const t = drag.t;
+    const rx = wx - drag.offX, ry = wy - drag.offY;
+    // keep a "raw" angle across the drag so leaving a snap restores the original orientation
+    if (drag.rawA === undefined) drag.rawA = t.a;
+    const s = findSnap(t, rx, ry, drag.rawA);
+    if (s) { t.x = s.x; t.y = s.y; t.a = s.a; snapInfo = s; }
+    else { t.x = rx; t.y = ry; t.a = drag.rawA; snapInfo = null; }
+  } else if (drag.mode === "rotate") {
+    const t = drag.t;
+    let a = drag.startA + Math.atan2(wy - t.y, wx - t.x) - drag.startPtr;
+    if (e.shiftKey) a = Math.round(a / D36) * D36;
+    t.a = normAngle(a);
+  }
+  requestDraw();
+});
+
+function endDrag() {
+  if (drag && drag.mode === "rotate") {
+    const t = drag.t;
+    const s = findSnap(t, t.x, t.y, t.a);    // snap after rotating too
+    if (s) { t.x = s.x; t.y = s.y; t.a = s.a; }
+  }
+  drag = null; snapInfo = null;
+  cv.style.cursor = "default";
+  requestDraw();
+}
+cv.addEventListener("pointerup", endDrag);
+cv.addEventListener("pointercancel", endDrag);
+
+function updateHoverCursor(sx, sy, wx, wy) {
+  if (selected) {
+    const [hx, hy] = toScreen(...handlePos(selected));
+    if (Math.hypot(sx - hx, sy - hy) <= 14) { cv.style.cursor = "alias"; return; }
+  }
+  cv.style.cursor = tiles.some(t => pointInPoly(wx, wy, worldVerts(t))) ? "grab" : "default";
+}
+
+cv.addEventListener("wheel", e => {
+  e.preventDefault();
+  const [sx, sy] = pointerPos(e);
+  const [wx, wy] = toWorld(sx, sy);
+  cam.z = Math.min(4, Math.max(0.2, cam.z * Math.exp(-e.deltaY * 0.0015)));
+  const [wx2, wy2] = toWorld(sx, sy);
+  cam.x += wx - wx2; cam.y += wy - wy2;
+  requestDraw();
+}, { passive: false });
+
+window.addEventListener("keydown", e => {
+  if ((e.key === "Delete" || e.key === "Backspace") && selected && document.activeElement.tagName !== "SELECT") {
+    tiles = tiles.filter(t => t !== selected); selected = null; requestDraw();
+  }
+});
+
+/* ===================== 8. Controls ===================== */
+function addTile(type) {
+  const n = theme().colors.length;
+  // spawn near view centre, nudged so new tiles don't stack exactly
+  const jitter = () => (Math.random() - 0.5) * 120 / cam.z;
+  const t = { id: nextId++, type, x: cam.x + jitter(), y: cam.y + jitter(), a: 0, ci: Math.floor(Math.random() * n) };
+  tiles.push(t); selected = t; requestDraw();
+}
+document.getElementById("addKite").onclick = () => addTile("kite");
+document.getElementById("addDart").onclick = () => addTile("dart");
+document.getElementById("reset").onclick = () => {
+  tiles = []; selected = null; cam.x = 0; cam.y = 0; cam.z = 1; requestDraw();
+};
+function randomSplitPair() {
+  const n = theme().colors.length;
+  const a = Math.floor(Math.random() * n);
+  let b = Math.floor(Math.random() * (n - 1)); if (b >= a) b++;
+  splitPair = [a, b];
+}
+document.getElementById("regen").onclick = () => {
+  const n = theme().colors.length;
+  for (const t of tiles) {
+    let c; do { c = Math.floor(Math.random() * n); } while (n > 1 && c === t.ci);
+    t.ci = c;
+  }
+  randomSplitPair();
+  requestDraw();
+};
+const sel = document.getElementById("theme");
+for (const name in THEMES) { const o = document.createElement("option"); o.value = o.textContent = name; sel.appendChild(o); }
+sel.value = themeName;
+sel.onchange = () => { themeName = sel.value; sel.blur(); requestDraw(); };
+document.getElementById("split").onchange = e => { split = e.target.checked; requestDraw(); };
+
+/* ===================== 9. Boot ===================== */
+window.addEventListener("resize", resize);
+resize();
+// Starter tiles
+addTile("kite"); tiles[0].x = -90; tiles[0].y = 0;
+addTile("dart"); tiles[1].x = 90; tiles[1].y = 0;
+selected = null; requestDraw();
+})();
+</script>
+</body>
+</html>
