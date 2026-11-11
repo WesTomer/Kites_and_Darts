@@ -34,6 +34,9 @@
   .track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 17px; height: 17px; border-radius: 50%; background: #fff; transition: transform .2s; box-shadow: 0 1px 3px rgba(0,0,0,.4); }
   .switch input:checked + .track { background: var(--accent); }
   .switch input:checked + .track::after { transform: translateX(17px); }
+  #mosaicSel { max-width: 180px; }
+  #saveStatus { font-size: 12px; opacity: .65; white-space: nowrap; min-width: 52px; }
+  #saveStatus.err { color: #ff8a8a; opacity: 1; }
   #count { margin-left: auto; font-size: 12px; opacity: .7; white-space: nowrap; }
   canvas { position: fixed; top: 56px; left: 0; display: block; touch-action: none; }
   #help {
@@ -45,6 +48,13 @@
 <body>
 <div id="bar">
   <h1>Penrose <span>P2</span> Sandbox</h1>
+  <button id="newMosaic" title="Start a new mosaic (current one stays saved)">New</button>
+  <label class="lbl" for="mosaicSel">Mosaic</label>
+  <select id="mosaicSel" title="Open a saved mosaic"></select>
+  <button id="renameMosaic" title="Rename current mosaic">Rename</button>
+  <button id="deleteMosaic" title="Delete current mosaic">Delete</button>
+  <span id="saveStatus"></span>
+  <div class="sep"></div>
   <button id="addKite" class="primary">Add Kite</button>
   <button id="addDart" class="primary">Add Dart</button>
   <button id="reset">Reset Screen</button>
@@ -231,7 +241,7 @@ function pathPoly(v) {
   ctx.closePath();
 }
 
-function draw() {
+let draw = function () {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.imageSmoothingEnabled = true;
   drawGrid();
@@ -288,7 +298,7 @@ function draw() {
   }
   document.getElementById("count").textContent =
     `${tiles.length} tile${tiles.length === 1 ? "" : "s"} · ${tiles.filter(t => t.type === "kite").length} kites · ${tiles.filter(t => t.type === "dart").length} darts`;
-}
+};
 
 let raf = 0;
 const requestDraw = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; draw(); }); };
@@ -473,13 +483,189 @@ sel.value = themeName;
 sel.onchange = () => { themeName = sel.value; sel.blur(); requestDraw(); };
 document.getElementById("split").onchange = e => { split = e.target.checked; requestDraw(); };
 
-/* ===================== 9. Boot ===================== */
+/* ===================== 9. Mosaics (auto-save) ===================== */
+// Stored in localStorage:
+//   penroseP2.mosaics -> { [id]: {id, name, created, updated, data} }
+//   penroseP2.current -> id of the mosaic last open
+// Auto-save: every redraw schedules a debounced check; the mosaic is written only if its
+// serialized content actually changed. Also flushed when the page is hidden/closed.
+const LS_MOSAICS = "penroseP2.mosaics", LS_CURRENT = "penroseP2.current";
+const SAVE_DELAY = 400;
+const mosaicSel = document.getElementById("mosaicSel");
+const saveStatus = document.getElementById("saveStatus");
+let mosaics = {};
+let currentId = null;
+let lastSavedJSON = "";
+let saveTimer = 0;
+let storageOK = true;
+
+function loadStore() {
+  try {
+    mosaics = JSON.parse(localStorage.getItem(LS_MOSAICS) || "{}") || {};
+    if (typeof mosaics !== "object" || Array.isArray(mosaics)) mosaics = {};
+    return localStorage.getItem(LS_CURRENT);
+  } catch (err) { storageOK = false; mosaics = {}; return null; }
+}
+function writeStore() {
+  try {
+    localStorage.setItem(LS_MOSAICS, JSON.stringify(mosaics));
+    if (currentId) localStorage.setItem(LS_CURRENT, currentId);
+    storageOK = true;
+  } catch (err) { storageOK = false; }
+  return storageOK;
+}
+function setStatus(txt, isErr = false) { saveStatus.textContent = txt; saveStatus.classList.toggle("err", isErr); }
+
+const r4 = v => Math.round(v * 1e4) / 1e4;   // compact but lossless enough for snapped edges (<0.0001 px)
+function serialize() {
+  return JSON.stringify({
+    v: 1,
+    tiles: tiles.map(t => ({ id: t.id, type: t.type, x: r4(t.x), y: r4(t.y), a: r4(t.a), ci: t.ci })),
+    nextId, themeName, split, splitPair,
+    cam: { x: r4(cam.x), y: r4(cam.y), z: r4(cam.z) }
+  });
+}
+function applyData(d) {
+  drag = null; snapInfo = null; pinch = null; pointers.clear(); selected = null;
+  tiles = Array.isArray(d && d.tiles)
+    ? d.tiles.filter(t => t && SHAPES[t.type] && [t.x, t.y, t.a].every(Number.isFinite))
+             .map(t => ({ id: t.id, type: t.type, x: t.x, y: t.y, a: t.a, ci: Number.isInteger(t.ci) ? t.ci : 0 }))
+    : [];
+  nextId = Math.max(Number.isInteger(d && d.nextId) ? d.nextId : 1, ...tiles.map(t => (t.id | 0) + 1), 1);
+  themeName = d && THEMES[d.themeName] ? d.themeName : themeName;
+  split = !!(d && d.split);
+  splitPair = d && Array.isArray(d.splitPair) && d.splitPair.length === 2 ? d.splitPair.slice() : [0, 1];
+  const c = (d && d.cam) || {};
+  cam.x = Number.isFinite(c.x) ? c.x : 0;
+  cam.y = Number.isFinite(c.y) ? c.y : 0;
+  cam.z = Number.isFinite(c.z) ? Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, c.z)) : 1;
+  sel.value = themeName;
+  document.getElementById("split").checked = split;
+  requestDraw();
+}
+
+function saveNow() {
+  clearTimeout(saveTimer); saveTimer = 0;
+  if (!currentId || !mosaics[currentId]) return;
+  const json = serialize();
+  if (json === lastSavedJSON) return;
+  const m = mosaics[currentId];
+  m.data = JSON.parse(json); m.updated = Date.now();
+  if (writeStore()) { lastSavedJSON = json; setStatus("Saved"); }
+  else setStatus("Not saved", true);
+}
+function scheduleSave() {
+  if (!currentId) return;
+  if (!saveTimer) saveTimer = setTimeout(saveNow, SAVE_DELAY);
+}
+
+function uniqueName(base) {
+  const names = new Set(Object.values(mosaics).map(m => m.name));
+  if (!names.has(base)) return base;
+  let n = 2; while (names.has(`${base} (${n})`)) n++;
+  return `${base} (${n})`;
+}
+function defaultName() {
+  let n = Object.keys(mosaics).length + 1;
+  const names = new Set(Object.values(mosaics).map(m => m.name));
+  while (names.has(`Mosaic ${n}`)) n++;
+  return `Mosaic ${n}`;
+}
+function refreshMosaicList() {
+  mosaicSel.innerHTML = "";
+  Object.values(mosaics).sort((a, b) => b.updated - a.updated).forEach(m => {
+    const o = document.createElement("option");
+    o.value = m.id; o.textContent = m.name;
+    mosaicSel.appendChild(o);
+  });
+  if (currentId) mosaicSel.value = currentId;
+}
+function createMosaic(name, starter) {
+  saveNow();
+  const id = "m" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const now = Date.now();
+  mosaics[id] = { id, name: uniqueName(name || defaultName()), created: now, updated: now, data: null };
+  currentId = id;
+  applyData({ themeName, split: false, tiles: [], cam: { x: 0, y: 0, z: 1 } });   // keeps current theme
+  if (starter) {
+    addTile("kite"); tiles[0].x = -90; tiles[0].y = 0;
+    addTile("dart"); tiles[1].x = 90; tiles[1].y = 0;
+    selected = null;
+  }
+  lastSavedJSON = "";
+  saveNow();
+  refreshMosaicList();
+}
+function openMosaic(id) {
+  if (!mosaics[id] || id === currentId) return;
+  saveNow();
+  currentId = id;
+  applyData(mosaics[id].data || {});
+  lastSavedJSON = serialize();
+  writeStore();
+  refreshMosaicList();
+  setStatus("Opened");
+}
+
+document.getElementById("newMosaic").onclick = () => { createMosaic(null, false); setStatus("New"); };
+mosaicSel.onchange = () => { openMosaic(mosaicSel.value); mosaicSel.blur(); };
+document.getElementById("renameMosaic").onclick = () => {
+  const m = mosaics[currentId]; if (!m) return;
+  const input = prompt("Rename mosaic:", m.name);
+  if (input === null) return;
+  const name = input.trim().slice(0, 60);
+  if (!name || name === m.name) return;
+  m.name = uniqueName(name);
+  writeStore(); refreshMosaicList(); setStatus(storageOK ? "Renamed" : "Not saved", !storageOK);
+};
+document.getElementById("deleteMosaic").onclick = () => {
+  const m = mosaics[currentId]; if (!m) return;
+  if (!confirm(`Delete "${m.name}"? This cannot be undone.`)) return;
+  clearTimeout(saveTimer); saveTimer = 0;
+  delete mosaics[currentId];
+  const rest = Object.values(mosaics).sort((a, b) => b.updated - a.updated);
+  if (rest.length) {
+    currentId = rest[0].id;
+    applyData(rest[0].data || {});
+    lastSavedJSON = serialize();
+    writeStore(); refreshMosaicList();
+  } else {
+    currentId = null;
+    createMosaic(null, false);   // always keep one open mosaic
+  }
+  setStatus("Deleted");
+};
+
+// Hook auto-save into every redraw (covers drag, rotate, snap, add, delete, colors, theme, zoom, pan).
+const _draw = draw;
+draw = function () { _draw(); scheduleSave(); };
+window.addEventListener("pagehide", saveNow);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") saveNow(); });
+// Another tab changed the store: refresh the list (do not clobber the open canvas).
+window.addEventListener("storage", e => {
+  if (e.key !== LS_MOSAICS) return;
+  try { const other = JSON.parse(e.newValue || "{}"); if (mosaics[currentId]) other[currentId] = mosaics[currentId]; mosaics = other; } catch (_) {}
+  refreshMosaicList();
+});
+
+/* ===================== 10. Boot ===================== */
 window.addEventListener("resize", resize);
 resize();
-// Starter tiles
-addTile("kite"); tiles[0].x = -90; tiles[0].y = 0;
-addTile("dart"); tiles[1].x = 90; tiles[1].y = 0;
-selected = null; requestDraw();
+const lastId = loadStore();
+if (lastId && mosaics[lastId]) {
+  currentId = lastId;
+  applyData(mosaics[lastId].data || {});
+  lastSavedJSON = serialize();
+  refreshMosaicList();
+} else if (Object.keys(mosaics).length) {
+  const m = Object.values(mosaics).sort((a, b) => b.updated - a.updated)[0];
+  currentId = m.id; applyData(m.data || {}); lastSavedJSON = serialize(); writeStore(); refreshMosaicList();
+} else {
+  // First run: same starter tiles as before
+  createMosaic("Mosaic 1", true);
+}
+if (!storageOK) setStatus("Storage unavailable", true);
+requestDraw();
 })();
 </script>
 </body>
