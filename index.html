@@ -285,15 +285,15 @@ let draw = function () {
     ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(hx, hy); ctx.stroke();
     ctx.fillStyle = "#ffffff"; ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.fill();
 
-    ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 6;
+    ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 12;
     ctx.fillStyle = drag && drag.mode === "rotate" ? "#6ea8ff" : "#ffffff";
-    ctx.beginPath(); ctx.arc(hx, hy, 11, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(hx, hy, 22, 0, Math.PI * 2); ctx.fill();
     ctx.shadowBlur = 0;
-    ctx.strokeStyle = "#2c3446"; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(hx, hy, 5.5, -Math.PI * 0.15, Math.PI * 1.35); ctx.stroke();
-    const ang = Math.PI * 1.35, ax = hx + Math.cos(ang) * 5.5, ay = hy + Math.sin(ang) * 5.5;
+    ctx.strokeStyle = "#2c3446"; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.arc(hx, hy, 11, -Math.PI * 0.15, Math.PI * 1.35); ctx.stroke();
+    const ang = Math.PI * 1.35, ax = hx + Math.cos(ang) * 11, ay = hy + Math.sin(ang) * 11;
     ctx.fillStyle = "#2c3446";
-    ctx.beginPath(); ctx.moveTo(ax - 3.5, ay - 1); ctx.lineTo(ax + 2.5, ay - 3.5); ctx.lineTo(ax + 1.5, ay + 3); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(ax - 7, ay - 2); ctx.lineTo(ax + 5, ay - 7); ctx.lineTo(ax + 3, ay + 6); ctx.closePath(); ctx.fill();
     ctx.restore();
   }
   document.getElementById("count").textContent =
@@ -336,7 +336,7 @@ cv.addEventListener("pointerdown", e => {
   // Rotation handle has priority
   if (selected) {
     const [hx, hy] = toScreen(...handlePos(selected));
-    if (Math.hypot(sx - hx, sy - hy) <= 14) {
+    if (Math.hypot(sx - hx, sy - hy) <= 28) {
       drag = { mode: "rotate", t: selected, startA: selected.a, startPtr: Math.atan2(wy - selected.y, wx - selected.x) };
       requestDraw(); return;
     }
@@ -412,7 +412,7 @@ cv.addEventListener("pointercancel", pointerEnd);
 function updateHoverCursor(sx, sy, wx, wy) {
   if (selected) {
     const [hx, hy] = toScreen(...handlePos(selected));
-    if (Math.hypot(sx - hx, sy - hy) <= 14) { cv.style.cursor = "alias"; return; }
+    if (Math.hypot(sx - hx, sy - hy) <= 28) { cv.style.cursor = "alias"; return; }
   }
   cv.style.cursor = tiles.some(t => pointInPoly(wx, wy, worldVerts(t))) ? "grab" : "default";
 }
